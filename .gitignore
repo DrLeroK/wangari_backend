@@ -1,0 +1,40 @@
+# Django
+*.log
+*.pot
+*.pyc
+__pycache__/
+db.sqlite3
+media/
+staticfiles/
+
+# Environment files
+.env
+.env.prod
+.env.local
+/secrets/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Virtual environment
+venv/
+env/
+ENV/
+
+# Node/npm (if you have frontend in same repo)
+node_modules/
+npm-debug.log*
+
+# macOS
+.DS_Store
+
+# Backup files
+*.bak
+*.backup
+
+# Database
+*.db
+*.sqlite
