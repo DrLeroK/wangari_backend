@@ -1,5 +1,8 @@
 from django.urls import path
 from . import views
+from .analytics_views import OwnerAnalyticsView, ExportAnalyticsView
+
+
 
 urlpatterns = [
     # Public routes (No authentication required)
@@ -35,6 +38,9 @@ urlpatterns = [
     path('admin/activity-logs/', views.ActivityLogListView.as_view(), name='activity-logs'),
     path('admin/reviews/', views.ReviewManagementView.as_view(), name='review-management'),
     path('admin/reviews/<int:pk>/toggle/', views.ToggleReviewStatusView.as_view(), name='toggle-review-status'),
+
+    # path('admin/reviews/', views.ReviewManagementView.as_view(), name='review-management'),
+    # path('admin/reviews/<int:pk>/toggle/', views.ToggleReviewStatusView.as_view(), name='toggle-review-status'),
     
     # Additional admin management routes
     path('admin/low-stock-products/', views.LowStockProductsView.as_view(), name='low-stock-products'),
@@ -43,4 +49,11 @@ urlpatterns = [
 
     # Enhanced stats view
     path('admin/stats/', views.EnhancedOrderStatsView.as_view(), name='admin-stats'),
+
+    # For role specific dashboard view
+    path('admin/role-dashboard-data/', views.RoleSpecificDashboardData.as_view(), name='role-dashboard-data'),
+
+    # Analytics URLs
+    path('admin/analytics/', OwnerAnalyticsView.as_view(), name='owner-analytics'),
+    path('admin/analytics/export/', ExportAnalyticsView.as_view(), name='export-analytics'),
 ]

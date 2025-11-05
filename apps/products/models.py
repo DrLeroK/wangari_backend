@@ -3,7 +3,7 @@ from django.contrib.auth import get_user_model
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.utils import timezone
 from decimal import Decimal
-
+import json
 
 User = get_user_model()
 
@@ -31,9 +31,34 @@ class Product(models.Model):
         (DESSERT, 'Dessert'),
     ]
     
+    PRICING_TYPE_CHOICES = [
+        ('fixed', 'Fixed Price'),
+        ('per_kg', 'Per Kilogram'),
+    ]
+    
     name = models.CharField(max_length=200)
     description = models.TextField(blank=True)
-    price = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(0)])
+    price = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        validators=[MinValueValidator(Decimal('0.01'))],
+        help_text="Price per kg for food items, fixed price for drinks/desserts"
+    )
+    
+    # New fields for weight-based pricing
+    pricing_type = models.CharField(
+        max_length=10,
+        choices=PRICING_TYPE_CHOICES,
+        default='fixed',
+        help_text="Whether price is per kg or fixed"
+    )
+    
+    available_weights = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Available weight increments in kg (e.g., [0.25, 0.5, 0.75, 1.0])"
+    )
+    
     stock_quantity = models.IntegerField(default=0, validators=[MinValueValidator(0)])
     category = models.ForeignKey(Category, on_delete=models.CASCADE, related_name='products')
     product_type = models.CharField(max_length=10, choices=PRODUCT_TYPE_CHOICES, default=FOOD)
@@ -46,6 +71,24 @@ class Product(models.Model):
     
     def __str__(self):
         return self.name
+    
+    @property
+    def is_weight_based(self):
+        """Check if product uses weight-based pricing"""
+        return self.pricing_type == 'per_kg' and self.product_type == self.FOOD
+    
+    def calculate_price(self, quantity=1, weight_kg=None):
+        """Calculate price based on quantity and weight"""
+        if self.is_weight_based and weight_kg is not None:
+            return self.price * Decimal(str(weight_kg))
+        else:
+            return self.price * quantity
+    
+    def save(self, *args, **kwargs):
+        # Set default available weights for food items with per_kg pricing
+        if self.is_weight_based and not self.available_weights:
+            self.available_weights = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0]
+        super().save(*args, **kwargs)
     
     @property
     def average_rating(self):
@@ -100,19 +143,37 @@ class CartItem(models.Model):
     cart = models.ForeignKey(Cart, on_delete=models.CASCADE, related_name='items')
     product = models.ForeignKey(Product, on_delete=models.CASCADE)
     quantity = models.IntegerField(default=1, validators=[MinValueValidator(1)])
+    
+    # Weight field for weight-based products
+    weight_kg = models.DecimalField(
+        max_digits=6, 
+        decimal_places=3,  # Allows up to 999.999 kg with 3 decimal precision
+        null=True, 
+        blank=True,
+        validators=[MinValueValidator(Decimal('0.001'))],  # Minimum 1 gram
+        help_text="Weight in kg for weight-based products"
+    )
+    
     special_instructions = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
     @property
     def total_price(self):
-        return self.quantity * self.product.price
+        """Calculate total price considering weight for weight-based products"""
+        if self.product.is_weight_based and self.weight_kg:
+            return self.weight_kg * self.product.price
+        else:
+            return self.quantity * self.product.price
     
     class Meta:
-        unique_together = ['cart', 'product']
+        unique_together = ['cart', 'product', 'weight_kg']
     
     def __str__(self):
-        return f"{self.quantity} x {self.product.name}"
+        if self.product.is_weight_based and self.weight_kg:
+            return f"{self.weight_kg}kg x {self.product.name}"
+        else:
+            return f"{self.quantity} x {self.product.name}"
 
 
 class Order(models.Model):
@@ -158,7 +219,39 @@ class Order(models.Model):
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default=PENDING)
     total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     delivery_address = models.TextField(blank=True)
-    delivery_fee = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+
+    # added fields for payment confirmation and scheduling
+    pickup_time = models.DateTimeField(null=True, blank=True, help_text="Scheduled pickup time")
+    delivery_time = models.DateTimeField(null=True, blank=True, help_text="Scheduled delivery time")
+    payment_confirmation = models.ImageField(
+        upload_to='payment_confirmations/', 
+        null=True, 
+        blank=True,
+        help_text="Screenshot of payment confirmation"
+    )
+    payment_verified = models.BooleanField(default=False, help_text="Whether payment has been verified by admin")
+    payment_verified_by = models.ForeignKey(
+        User, 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True,
+        related_name='verified_payments',
+        help_text="Staff member who verified the payment"
+    )
+    payment_verified_at = models.DateTimeField(
+        null=True, 
+        blank=True,
+        help_text="When payment was verified"
+    )
+
+    table_number = models.CharField(
+        max_length=20, 
+        blank=True, 
+        null=True,
+        help_text="Table number for physical sales"
+    )
+
+    delivery_fee = models.DecimalField(max_digits=10, decimal_places=2, default=60)
     notes = models.TextField(blank=True)
     estimated_preparation_time = models.IntegerField(default=50, help_text="Estimated preparation time in minutes")
     ready_at = models.DateTimeField(null=True, blank=True)
@@ -195,15 +288,33 @@ class OrderItem(models.Model):
     order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='items')
     product = models.ForeignKey(Product, on_delete=models.CASCADE)
     quantity = models.IntegerField(validators=[MinValueValidator(1)])
+    
+    # Weight field for weight-based products
+    weight_kg = models.DecimalField(
+        max_digits=6, 
+        decimal_places=3,
+        null=True, 
+        blank=True,
+        validators=[MinValueValidator(Decimal('0.001'))],
+        help_text="Weight in kg for weight-based products"
+    )
+    
     unit_price = models.DecimalField(max_digits=10, decimal_places=2)
     special_instructions = models.TextField(blank=True)
     
     def __str__(self):
-        return f"{self.quantity} x {self.product.name}"
+        if self.product.is_weight_based and self.weight_kg:
+            return f"{self.weight_kg}kg x {self.product.name}"
+        else:
+            return f"{self.quantity} x {self.product.name}"
     
     @property
     def total_price(self):
-        return self.quantity * self.unit_price
+        """Calculate total price considering weight"""
+        if self.product.is_weight_based and self.weight_kg:
+            return self.weight_kg * self.unit_price
+        else:
+            return self.quantity * self.unit_price
 
 
 class ActivityLog(models.Model):

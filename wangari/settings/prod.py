@@ -39,13 +39,11 @@ STATICFILES_DIRS = []
 # Media Files
 MEDIA_URL = '/media/'
 MEDIA_ROOT = '/home/pldassociationor/wangari_backend/media'
-# MEDIA_ROOT = '/home/pldassociationor/public_html/media'
-
-# STATIC_ROOT = '/home/pldassociationor/pld_backend/staticfiles/'
-# MEDIA_ROOT = '/home/pldassociationor/pld_backend/mediafiles/'
 
 # For production
-FRONTEND_URL = 'https://www.pldassociation.org'
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://wan-deployment-frontend.vercel.app')
+DOMAIN = os.getenv('DOMAIN', 'wan-deployment-frontend.vercel.app')
+# FRONTEND_URL = 'https://www.pldassociation.org'
 # DOMAIN = 'pldassociation.org'  # or 'www.pldassociation.org'
 SITE_NAME = 'Wangari Restaurant'
 

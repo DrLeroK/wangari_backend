@@ -34,6 +34,9 @@ urlpatterns = [
     path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     
     path('products/', include('apps.products.urls')),
+
+    path('site-review-contact/', include('apps.site_review_contact.urls')),
+    path('payroll/', include('apps.payroll.urls')),
     # path('contact_review/', include('apps.contact_review.urls')),
     # path('payments/', include('apps.payments.urls')),
 

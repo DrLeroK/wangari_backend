@@ -1,58 +1,28 @@
-# from rest_framework import serializers
-# from django.contrib.auth import get_user_model
-# from django.contrib.auth.password_validation import validate_password
-# from rest_framework.validators import UniqueValidator
-# from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-# from .utils import send_verification_email
-
-
-# User = get_user_model()
-
-
-# class UserSerializer(serializers.ModelSerializer):
-#     # class Meta:
-#     #     model = User
-#     #     fields = ['id', 'first_name', 'last_name', 'email', 'phone_number']
-#     #     read_only_fields = ['id']
-
-#     is_admin = serializers.BooleanField(source='is_superuser', read_only=True)
-#     groups = serializers.SlugRelatedField(
-#         many=True,
-#         read_only=True,
-#         slug_field='name'
-#     )
-    
-#     class Meta:
-#         model = User
-#         fields = [
-#             'id', 
-#             'first_name', 
-#             'last_name', 
-#             'email', 
-#             'phone_number',
-#             'is_staff',
-#             'is_superuser',
-#             'is_admin',
-#             'is_active',
-#             'groups'
-#         ]
-#         read_only_fields = ['id']
-
-# apps/user_management/serializers.py
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from rest_framework.validators import UniqueValidator
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from .utils import send_verification_email
+from django.contrib.auth import authenticate
 
 User = get_user_model()
+
+
 
 class UserSerializer(serializers.ModelSerializer):
     is_admin = serializers.BooleanField(source='is_superuser', read_only=True)
     groups = serializers.SerializerMethodField()
     is_owner = serializers.SerializerMethodField()
     is_worker = serializers.SerializerMethodField()
+    
+    # ADD THESE NEW FIELDS FOR SPECIFIC ROLES
+    is_chef = serializers.SerializerMethodField()
+    is_waiter = serializers.SerializerMethodField()
+    is_cashier = serializers.SerializerMethodField()
+    is_butcher = serializers.SerializerMethodField()
+    
+    loyalty_tier = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -69,9 +39,16 @@ class UserSerializer(serializers.ModelSerializer):
             'is_email_verified',
             'groups',
             'is_owner',
-            'is_worker'
+            'is_worker',
+            # ADD THE NEW ROLE FIELDS
+            'is_chef',
+            'is_waiter', 
+            'is_cashier',
+            'is_butcher',
+            'loyalty_points',
+            'loyalty_tier'
         ]
-        read_only_fields = ['id']
+        read_only_fields = ['id', 'loyalty_points']
 
     def get_groups(self, obj):
         return [group.name for group in obj.groups.all()]
@@ -81,42 +58,25 @@ class UserSerializer(serializers.ModelSerializer):
 
     def get_is_worker(self, obj):
         return obj.groups.filter(name='Worker').exists()
-
-# class UserSerializer(serializers.ModelSerializer):
-#     is_admin = serializers.BooleanField(source='is_superuser', read_only=True)
-#     groups = serializers.SerializerMethodField()
-#     is_owner = serializers.SerializerMethodField()
-#     is_worker = serializers.SerializerMethodField()
-
-#     class Meta:
-#         model = User
-#         fields = [
-#             'id', 
-#             'first_name', 
-#             'last_name', 
-#             'email', 
-#             'phone_number',
-#             'is_staff',
-#             'is_superuser',
-#             'is_admin',
-#             'is_active',
-#             'is_email_verified',
-#             'groups',
-#             'is_owner',
-#             'is_worker'
-#         ]
-#         read_only_fields = ['id']
-
-#     def get_groups(self, obj):
-#         return [group.name for group in obj.groups.all()]
-
-#     def get_is_owner(self, obj):
-#         return obj.groups.filter(name='Owner').exists()
-
-#     def get_is_worker(self, obj):
-#         return obj.groups.filter(name='Worker').exists()
+    
+    # ADD THESE NEW METHODS
+    def get_is_chef(self, obj):
+        return obj.groups.filter(name='Chef').exists()
+    
+    def get_is_waiter(self, obj):
+        return obj.groups.filter(name='Waiter').exists()
+    
+    def get_is_cashier(self, obj):
+        return obj.groups.filter(name='Cashier').exists()
+    
+    def get_is_butcher(self, obj):
+        return obj.groups.filter(name='Butcher').exists()
+    
+    def get_loyalty_tier(self, obj):
+        return obj.get_loyalty_tier()
     
 
+    
 
 class RegisterSerializer(serializers.ModelSerializer):
     email = serializers.EmailField(
@@ -186,20 +146,6 @@ class RegisterSerializer(serializers.ModelSerializer):
         
         return user
 
-    
-    # def create(self, validated_data):
-    #     # Remove password2 before creating user
-    #     validated_data.pop('password2')
-    #     user = User.objects.create(
-    #         email=validated_data['email'],
-    #         first_name=validated_data['first_name'],
-    #         last_name=validated_data['last_name'],
-    #         phone_number=validated_data['phone_number']
-    #     )
-    #     user.set_password(validated_data['password'])
-    #     user.save()
-    #     return user
-
 
 
 class VerifyEmailSerializer(serializers.Serializer):
@@ -223,6 +169,7 @@ class VerifyEmailSerializer(serializers.Serializer):
         return attrs
 
 
+
 class ResendOTPSerializer(serializers.Serializer):
     email = serializers.EmailField(required=True)
     
@@ -239,260 +186,47 @@ class ResendOTPSerializer(serializers.Serializer):
     
     
 # Working Custom Token Serializer
+# ==============================================================================
+
+
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
+    username_field = 'email'
+    
     def validate(self, attrs):
-        # Rename email to username for parent class validation
         email = attrs.get('email')
-        if email:
-            attrs['username'] = email
-        
-        print(f"🔐 Login attempt for email: {email}")
+        password = attrs.get('password')
         
         try:
-            # Call parent validation
+            # Use email as username for parent class
+            attrs['username'] = email
+            
+            # Let parent class handle the main validation
             data = super().validate(attrs)
             
-            print(f"✅ Login successful for user: {self.user.email}")
-            print(f"✅ User is_active: {self.user.is_active}")
-            print(f"✅ User is_email_verified: {self.user.is_email_verified}")
-            
-            # Use the UserSerializer to get complete user data
+            # Add user data to response
             user_serializer = UserSerializer(self.user)
-            user_data = user_serializer.data
+            data['user'] = user_serializer.data
             
-            # Add user data to the response
-            data['user'] = user_data
-            
-            # Add custom claims to token if needed
-            data['is_admin'] = self.user.is_superuser
-            data['email'] = self.user.email
-            data['first_name'] = self.user.first_name
-            data['last_name'] = self.user.last_name
-            
-            # Add group information
-            groups = self.user.groups.all()
-            data['groups'] = [group.name for group in groups]
-            data['is_owner'] = groups.filter(name='Owner').exists()
-            data['is_worker'] = groups.filter(name='Worker').exists()
-            data['is_staff'] = self.user.is_staff
+            # Add additional user information with ALL roles
+            data.update({
+                'is_admin': self.user.is_superuser,
+                'email': self.user.email,
+                'first_name': self.user.first_name,
+                'last_name': self.user.last_name,
+                'groups': [group.name for group in self.user.groups.all()],
+                # ALL ROLE BOOLEANS
+                'is_owner': self.user.groups.filter(name='Owner').exists(),
+                'is_worker': self.user.groups.filter(name='Worker').exists(),
+                'is_chef': self.user.groups.filter(name='Chef').exists(),
+                'is_waiter': self.user.groups.filter(name='Waiter').exists(),
+                'is_cashier': self.user.groups.filter(name='Cashier').exists(),
+                'is_butcher': self.user.groups.filter(name='Butcher').exists(),
+                'is_staff': self.user.is_staff,
+            })
             
             return data
             
         except Exception as e:
-            print(f"❌ Login failed: {str(e)}")
-            print(f"❌ User exists: {User.objects.filter(email=email).exists()}")
-            if User.objects.filter(email=email).exists():
-                user = User.objects.get(email=email)
-                print(f"❌ User details - is_active: {user.is_active}, is_email_verified: {user.is_email_verified}")
+            print(f"Login error: {str(e)}")
             raise
-
-
-
-        
-# class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
-#     def __init__(self, *args, **kwargs):
-#         super().__init__(*args, **kwargs)
-        
-#         username_field = self.fields.get('username')
-#         if username_field:
-#             self.fields['email'] = username_field
-#             del self.fields['username']
-#             self.fields['email'].label = 'Email'
-
-#     def validate(self, attrs):
-#         # Rename email to username for parent class validation
-#         email = attrs.get('email')
-#         if email:
-#             attrs['username'] = email
-        
-#         print(f"🔐 Login attempt for email: {email}")
-        
-#         try:
-#             # Call parent validation
-#             data = super().validate(attrs)
-            
-#             print(f"✅ Login successful for user: {self.user.email}")
-#             print(f"✅ User is_active: {self.user.is_active}")
-#             print(f"✅ User is_email_verified: {self.user.is_email_verified}")
-            
-#             # Use the UserSerializer to get complete user data
-#             user_serializer = UserSerializer(self.user)
-#             user_data = user_serializer.data
-            
-#             # Add user data to the response
-#             data['user'] = user_data
-            
-#             return data
-            
-#         except Exception as e:
-#             print(f"❌ Login failed: {str(e)}")
-#             print(f"❌ User exists: {User.objects.filter(email=email).exists()}")
-#             if User.objects.filter(email=email).exists():
-#                 user = User.objects.get(email=email)
-#                 print(f"❌ User details - is_active: {user.is_active}, is_email_verified: {user.is_email_verified}")
-#             raise
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
-#     def __init__(self, *args, **kwargs):
-#         super().__init__(*args, **kwargs)
-        
-#         username_field = self.fields.get('username')
-#         if username_field:
-#             self.fields['email'] = username_field
-#             del self.fields['username']
-#             self.fields['email'].label = 'Email'
-
-#     def validate(self, attrs):
-#         # Rename email to username for parent class validation
-#         email = attrs.get('email')
-#         if email:
-#             attrs['username'] = email
-        
-#         print(f"🔐 Login attempt for email: {email}")
-        
-#         try:
-#             # Call parent validation
-#             data = super().validate(attrs)
-            
-#             print(f"✅ Login successful for user: {self.user.email}")
-#             print(f"✅ User is_active: {self.user.is_active}")
-#             print(f"✅ User is_email_verified: {self.user.is_email_verified}")
-            
-#             # Add custom claims
-#             data['is_admin'] = self.user.is_superuser
-#             data['email'] = self.user.email
-#             data['first_name'] = self.user.first_name
-#             data['last_name'] = self.user.last_name
-            
-#             # Add group information
-#             groups = self.user.groups.all()
-#             data['groups'] = [group.name for group in groups]
-#             data['is_owner'] = groups.filter(name='Owner').exists()
-#             data['is_worker'] = groups.filter(name='Worker').exists()
-#             data['is_staff'] = self.user.is_staff
-            
-#             return data
-            
-#         except Exception as e:
-#             print(f"❌ Login failed: {str(e)}")
-#             print(f"❌ User exists: {User.objects.filter(email=email).exists()}")
-#             if User.objects.filter(email=email).exists():
-#                 user = User.objects.get(email=email)
-#                 print(f"❌ User details - is_active: {user.is_active}, is_email_verified: {user.is_email_verified}")
-#             raise
-    
-
-
-
-
-
-
-
-
-# class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
-#     def __init__(self, *args, **kwargs):
-#         super().__init__(*args, **kwargs)
-        
-#         # Get the username field and recreate it as email field
-#         username_field = self.fields.get('username')
-#         if username_field:
-#             self.fields['email'] = username_field
-#             del self.fields['username']
-#             self.fields['email'].label = 'Email'
-
-#     def validate(self, attrs):
-#         # Rename email to username for parent class validation
-#         email = attrs.get('email')
-#         if email:
-#             attrs['username'] = email
-        
-#         # Call parent validation
-#         data = super().validate(attrs)
-        
-#         # Add custom claims
-#         data['is_admin'] = self.user.is_superuser
-#         data['email'] = self.user.email
-#         data['first_name'] = self.user.first_name
-#         data['last_name'] = self.user.last_name
-        
-#         # Add group information
-#         groups = self.user.groups.all()
-#         data['groups'] = [group.name for group in groups]
-#         data['is_owner'] = groups.filter(name='Owner').exists()
-#         data['is_worker'] = groups.filter(name='Worker').exists()
-#         data['is_staff'] = self.user.is_staff
-        
-#         return data
-
-
-
-
-
-
-
-
-
-
-
-# class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
-#     def __init__(self, *args, **kwargs):
-#         super().__init__(*args, **kwargs)
-        
-#         # Get the username field and recreate it as email field
-#         username_field = self.fields.get('username')
-#         if username_field:
-#             self.fields['email'] = username_field
-#             del self.fields['username']
-#             self.fields['email'].label = 'Email'
-
-#     def validate(self, attrs):
-#         # Rename email to username for parent class validation
-#         email = attrs.get('email')
-#         if email:
-#             attrs['username'] = email
-        
-#         # Call parent validation
-#         data = super().validate(attrs)
-        
-#         # Add custom claims
-#         data['is_admin'] = self.user.is_superuser
-#         data['email'] = self.user.email
-#         data['first_name'] = self.user.first_name
-#         data['last_name'] = self.user.last_name
-        
-#         return data
-        
-
-
-
-
-
-
-
-
-
-
-
-
-
-

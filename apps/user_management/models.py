@@ -64,6 +64,7 @@ class User(AbstractUser):
     is_email_verified = models.BooleanField(default=False)
     email_verification_otp = models.CharField(max_length=6, blank=True, null=True)
     otp_created_at = models.DateTimeField(blank=True, null=True)
+    loyalty_points = models.IntegerField(default=0, help_text="Loyalty points earned from orders")
 
     # Set email as the USERNAME_FIELD
     USERNAME_FIELD = 'email'
@@ -100,3 +101,21 @@ class User(AbstractUser):
 
     def __str__(self):
         return self.email
+
+    def add_loyalty_points(self, points, reason=""):
+        """Add points to user's loyalty balance"""
+        old_points = self.loyalty_points
+        self.loyalty_points += points
+        self.save()
+        return self.loyalty_points
+    
+    def get_loyalty_tier(self):
+        """Determine user's loyalty tier based on points"""
+        if self.loyalty_points >= 100:
+            return "Gold"
+        elif self.loyalty_points >= 60:
+            return "Silver"
+        elif self.loyalty_points >= 35:
+            return "Bronze"
+        else:
+            return "Member"

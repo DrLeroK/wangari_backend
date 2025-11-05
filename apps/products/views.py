@@ -11,6 +11,7 @@ from django.utils import timezone
 from datetime import date, timedelta
 from django.contrib.auth import get_user_model
 
+
 from .models import Category, Product, Review, Cart, CartItem, Order, OrderItem, ActivityLog
 from .serializers import (
     CategorySerializer, ProductSerializer, ProductListSerializer,
@@ -19,14 +20,22 @@ from .serializers import (
     OrderSerializer, OrderCreateSerializer, StockUpdateSerializer,
     ActivityLogSerializer
 )
-from .permissions import IsOwnerOrWorker, IsOwner, IsWorker, IsOrderOwnerOrStaff
 
+# from .permissions import IsOwnerOrWorker, IsOwner, IsWorker, IsOrderOwnerOrStaff
+
+from .permissions import (IsStaff, IsOwner, IsChef, IsWaiter, 
+                        IsCashier, IsButcher, CanManageProducts, 
+                        CanManageOrders, CanProcessPhysicalSales, 
+                        IsOwnerOrWorker, IsOrderOwnerOrStaff)
+
+from .services import LoyaltyService
 
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 
 
 User = get_user_model()
+
 
 
 ############ Activity Log Helper Function ############
@@ -46,6 +55,7 @@ def log_activity(user, action, model_name, object_id='', description='', old_val
 
 
 ################## Public Views (No authentication required) ######################
+
 
 class CategoryListView(generics.ListAPIView):
     permission_classes = [AllowAny]
@@ -105,8 +115,6 @@ class ProductReviewsView(generics.ListAPIView):
 
 
 
-# In your products/views.py - Alternative approach
-
 class CreateReviewView(generics.CreateAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = ReviewSerializer
@@ -134,38 +142,6 @@ class CreateReviewView(generics.CreateAPIView):
     def perform_create(self, serializer):
         product = self.get_serializer_context()['product']
         review = serializer.save(product=product, user=self.request.user)
-    
-
-
-# class CreateReviewView(generics.CreateAPIView):
-#     permission_classes = [IsAuthenticated]
-#     serializer_class = ReviewSerializer
-    
-#     def perform_create(self, serializer):
-#         product_id = self.kwargs['pk']
-#         product = get_object_or_404(Product, id=product_id, is_active=True)
-        
-#         # Check if user already reviewed this product
-#         if Review.objects.filter(product=product, user=self.request.user).exists():
-#             raise serializers.ValidationError({"detail": "You have already reviewed this product."})
-        
-#         review = serializer.save(product=product)
-
-#     def get_queryset(self):
-#         if getattr(self, 'swagger_fake_view', False):
-#             return Review.objects.none()
-#         return Review.objects.all()
-        
-#         # Log activity
-#         # log_activity(
-#         #     user=self.request.user,
-#         #     action='create',
-#         #     model_name='Review',
-#         #     object_id=str(review.id),
-#         #     description=f'Review created for {product.name}',
-#         #     new_value=f"Rating: {review.rating}",
-#         #     request=self.request
-#         # )
 
 
 
@@ -180,6 +156,7 @@ class CartView(generics.RetrieveAPIView):
         return cart
 
 
+
 class AddToCartView(APIView):
     permission_classes = [IsAuthenticated]
     
@@ -188,24 +165,48 @@ class AddToCartView(APIView):
         if serializer.is_valid():
             product_id = serializer.validated_data['product_id']
             quantity = serializer.validated_data['quantity']
+            weight_kg = serializer.validated_data.get('weight_kg')
             special_instructions = serializer.validated_data.get('special_instructions', '')
             
             product = get_object_or_404(Product, id=product_id, is_active=True, show=True)
             
-            if product.stock_quantity < quantity:
-                return Response(
-                    {'error': f'Insufficient stock. Only {product.stock_quantity} available.'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+            # FIXED: Check stock for BOTH product types
+            if product.is_weight_based:
+                # For weight-based products: check weight availability
+                if weight_kg and product.stock_quantity < weight_kg:
+                    return Response(
+                        {'error': f'Insufficient stock. Only {product.stock_quantity}kg available.'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+            else:
+                # For fixed-price products: check quantity availability
+                if product.stock_quantity < quantity:
+                    return Response(
+                        {'error': f'Insufficient stock. Only {product.stock_quantity} available.'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
             
             cart, created = Cart.objects.get_or_create(user=request.user)
             
-            # Check if item already in cart
+            # For weight-based products, use weight_kg in the lookup
+            if product.is_weight_based and weight_kg:
+                lookup_params = {
+                    'cart': cart,
+                    'product': product,
+                    'weight_kg': weight_kg
+                }
+            else:
+                lookup_params = {
+                    'cart': cart,
+                    'product': product
+                }
+            
+            # Check if item already in cart with same weight
             cart_item, created = CartItem.objects.get_or_create(
-                cart=cart,
-                product=product,
+                **lookup_params,
                 defaults={
                     'quantity': quantity,
+                    'weight_kg': weight_kg,
                     'special_instructions': special_instructions
                 }
             )
@@ -215,16 +216,6 @@ class AddToCartView(APIView):
                 if special_instructions:
                     cart_item.special_instructions = special_instructions
                 cart_item.save()
-            
-            # log_activity(
-            #     user=request.user,
-            #     action='create',
-            #     model_name='CartItem',
-            #     object_id=str(cart_item.id),
-            #     description=f'Item added to cart: {product.name}',
-            #     new_value=f"Quantity: {cart_item.quantity}",
-            #     request=request
-            # )
             
             return Response(CartSerializer(cart).data, status=status.HTTP_200_OK)
         
@@ -266,6 +257,7 @@ class UpdateCartItemView(generics.UpdateAPIView):
         # )
 
 
+
 class RemoveFromCartView(generics.DestroyAPIView):
     permission_classes = [IsAuthenticated]
     queryset = CartItem.objects.all()
@@ -286,6 +278,7 @@ class RemoveFromCartView(generics.DestroyAPIView):
             request=self.request
         )
         instance.delete()
+
 
 
 class ClearCartView(APIView):
@@ -310,66 +303,11 @@ class ClearCartView(APIView):
 
 
 
+
 ##################### Order Views #####################
 
-# class CreateOrderView(generics.CreateAPIView):
-#     permission_classes = [AllowAny]  # Allow both authenticated and guest users
-#     serializer_class = OrderCreateSerializer
-    
-#     def create(self, request, *args, **kwargs):
-#         # If user is authenticated, we can use their cart
-#         if request.user.is_authenticated and not request.user.groups.filter(name__in=['Worker', 'Owner']).exists():
-#             return self.create_from_cart(request)
-#         else:
-#             return super().create(request, *args, **kwargs)
-    
-#     def create_from_cart(self, request):
-#         cart = get_object_or_404(Cart, user=request.user)
-#         if cart.items.count() == 0:
-#             return Response(
-#                 {'error': 'Cart is empty.'},
-#                 status=status.HTTP_400_BAD_REQUEST
-#             )
-        
-#         # Prepare order data from cart
-#         order_data = {
-#             'customer_name': f"{request.user.first_name} {request.user.last_name}",
-#             'customer_email': request.user.email,
-#             'customer_phone': request.user.phone_number,
-#             'order_type': 'online',
-#             'fulfillment_method': request.data.get('fulfillment_method', 'pickup'),
-#             'delivery_address': request.data.get('delivery_address', ''),
-#             'notes': request.data.get('notes', ''),
-#             'items': []
-#         }
-        
-#         # Prepare items from cart
-#         for cart_item in cart.items.all():
-#             order_data['items'].append({
-#                 'product': cart_item.product,
-#                 'quantity': cart_item.quantity,
-#                 'unit_price': cart_item.product.price,
-#                 'special_instructions': cart_item.special_instructions
-#             })
-        
-#         serializer = self.get_serializer(data=order_data, context={'request': request})
-#         serializer.is_valid(raise_exception=True)
-#         order = serializer.save()
-        
-#         # Clear the cart after successful order
-#         cart.items.all().delete()
-        
-#         headers = self.get_success_headers(serializer.data)
-#         return Response(
-#             OrderSerializer(order).data,
-#             status=status.HTTP_201_CREATED,
-#             headers=headers
-#         )
-
-
-
 class CreateOrderView(generics.CreateAPIView):
-    permission_classes = [AllowAny]  # Allow both authenticated and guest users
+    permission_classes = [AllowAny]
     serializer_class = OrderCreateSerializer
     
     def create(self, request, *args, **kwargs):
@@ -378,7 +316,7 @@ class CreateOrderView(generics.CreateAPIView):
             return self.create_from_cart(request)
         else:
             return super().create(request, *args, **kwargs)
-    
+        
     def create_from_cart(self, request):
         cart = get_object_or_404(Cart, user=request.user)
         if cart.items.count() == 0:
@@ -387,7 +325,7 @@ class CreateOrderView(generics.CreateAPIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Prepare order data from cart
+        # Prepare order data from cart including new fields
         order_data = {
             'customer_name': f"{request.user.first_name} {request.user.last_name}",
             'customer_email': request.user.email,
@@ -396,17 +334,25 @@ class CreateOrderView(generics.CreateAPIView):
             'fulfillment_method': request.data.get('fulfillment_method', 'pickup'),
             'delivery_address': request.data.get('delivery_address', ''),
             'notes': request.data.get('notes', ''),
+            'pickup_time': request.data.get('pickup_time'),
+            'delivery_time': request.data.get('delivery_time'),
+            'payment_confirmation': request.FILES.get('payment_confirmation'),
             'items': []
         }
         
-        # Prepare items from cart
+        # FIXED: Prepare items from cart with weight_kg
         for cart_item in cart.items.all():
-            order_data['items'].append({
+            item_data = {
                 'product': cart_item.product.id,
                 'quantity': cart_item.quantity,
-                'unit_price': str(cart_item.product.price),
                 'special_instructions': cart_item.special_instructions
-            })
+            }
+            
+            # ADD THIS: Include weight_kg for weight-based products
+            if cart_item.product.is_weight_based and cart_item.weight_kg:
+                item_data['weight_kg'] = float(cart_item.weight_kg)
+            
+            order_data['items'].append(item_data)
         
         serializer = self.get_serializer(data=order_data, context={'request': request})
         serializer.is_valid(raise_exception=True)
@@ -434,23 +380,6 @@ class CreateOrderView(generics.CreateAPIView):
             headers=headers
         )
 
-    def perform_create(self, serializer):
-        # This handles guest orders (non-authenticated users)
-        request = self.request
-        order = serializer.save()
-        
-        # Log the guest order creation activity
-        log_activity(
-            user=None,  # No user for guest orders
-            action='create',
-            model_name='Order',
-            object_id=str(order.id),
-            description=f'Guest online order created: {order.order_number}',
-            new_value=f"Status: {order.status}, Total: ${order.final_total}, Customer: {order.customer_name}, Type: {order.order_type}, Method: {order.fulfillment_method}",
-            request=request
-        )
-
-
 
 class UserOrderListView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
@@ -468,10 +397,12 @@ class OrderDetailView(generics.RetrieveAPIView):
     queryset = Order.objects.all()
 
 
+
 ################## Admin Views (Owner and Worker permissions) ######################
 
 class AdminCategoryListCreateView(generics.ListCreateAPIView):
-    permission_classes = [IsAuthenticated, IsOwnerOrWorker]
+    # permission_classes = [IsAuthenticated, IsOwnerOrWorker]
+    permission_classes = [IsAuthenticated, CanManageProducts]
     serializer_class = CategorySerializer
     queryset = Category.objects.all()
     
@@ -489,7 +420,8 @@ class AdminCategoryListCreateView(generics.ListCreateAPIView):
 
 
 class AdminCategoryDetailView(generics.RetrieveUpdateDestroyAPIView):
-    permission_classes = [IsAuthenticated, IsOwnerOrWorker]
+    # permission_classes = [IsAuthenticated, IsOwnerOrWorker]
+    permission_classes = [IsAuthenticated, CanManageProducts]
     serializer_class = CategorySerializer
     queryset = Category.objects.all()
     
@@ -521,7 +453,8 @@ class AdminCategoryDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 
 class AdminProductListCreateView(generics.ListCreateAPIView):
-    permission_classes = [IsAuthenticated, IsOwnerOrWorker]
+    # permission_classes = [IsAuthenticated, IsOwnerOrWorker]
+    permission_classes = [IsAuthenticated, CanManageProducts]
     serializer_class = ProductSerializer
     queryset = Product.objects.all()
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
@@ -542,7 +475,8 @@ class AdminProductListCreateView(generics.ListCreateAPIView):
 
 
 class AdminProductDetailView(generics.RetrieveUpdateDestroyAPIView):
-    permission_classes = [IsAuthenticated, IsOwnerOrWorker]
+    # permission_classes = [IsAuthenticated, IsOwnerOrWorker]
+    permission_classes = [IsAuthenticated, CanManageProducts]
     serializer_class = ProductSerializer
     queryset = Product.objects.all()
     
@@ -589,6 +523,7 @@ class AdminProductDetailView(generics.RetrieveUpdateDestroyAPIView):
             request=self.request
         )
         instance.delete()
+
 
 
 class UpdateProductStockView(APIView):
@@ -642,8 +577,10 @@ class UpdateProductStockView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+
 class AdminOrderListView(generics.ListAPIView):
-    permission_classes = [IsAuthenticated, IsOwnerOrWorker]
+    # permission_classes = [IsAuthenticated, IsOwnerOrWorker]
+    permission_classes = [IsAuthenticated, CanManageOrders]
     serializer_class = OrderSerializer
     queryset = Order.objects.all()
     filter_backends = [filters.OrderingFilter]
@@ -669,6 +606,7 @@ class AdminOrderListView(generics.ListAPIView):
             queryset = queryset.filter(fulfillment_method=fulfillment_method)
         
         return queryset
+    
 
 
 class AdminOrderDetailView(generics.RetrieveUpdateAPIView):
@@ -680,12 +618,45 @@ class AdminOrderDetailView(generics.RetrieveUpdateAPIView):
         order = self.get_object()
         old_status = order.status
         
+        # Handle payment verification separately if it's in the request
+        request_data = self.request.data.copy()
+        payment_verified = request_data.pop('payment_verified', None)
+        
         updated_order = serializer.save()
+        
+        # Handle payment verification
+        if payment_verified is not None:
+            if payment_verified and not updated_order.payment_verified:
+                # Verify payment
+                updated_order.payment_verified = True
+                updated_order.payment_verified_by = self.request.user
+                updated_order.payment_verified_at = timezone.now()
+            elif not payment_verified and updated_order.payment_verified:
+                # Unverify payment
+                updated_order.payment_verified = False
+                updated_order.payment_verified_by = None
+                updated_order.payment_verified_at = None
+            updated_order.save()
         
         # Update ready_at time if status changed to ready
         if updated_order.status == 'ready' and not updated_order.ready_at:
             updated_order.ready_at = timezone.now()
             updated_order.save()
+        
+        # Process loyalty points when order status changes to completed
+        if (old_status != 'completed' and 
+            updated_order.status == 'completed'):
+            
+            print(f" Order {updated_order.order_number} status changed to completed")
+            print(f"   Processing loyalty points...")
+            
+            # Process loyalty points
+            points_awarded = LoyaltyService.process_order_loyalty_points(updated_order)
+            
+            if points_awarded:
+                print(f" Loyalty points awarded successfully!")
+            else:
+                print(f" No loyalty points awarded")
         
         # Log status change
         if old_status != updated_order.status:
@@ -699,27 +670,41 @@ class AdminOrderDetailView(generics.RetrieveUpdateAPIView):
                 new_value=updated_order.status,
                 request=self.request
             )
+        
+        # Log payment verification if changed
+        if payment_verified is not None:
+            action = 'verified' if payment_verified else 'unverified'
+            log_activity(
+                user=self.request.user,
+                action='update',
+                model_name='Order',
+                object_id=str(updated_order.id),
+                description=f'Payment {action} for order: {updated_order.order_number}',
+                old_value=str(not payment_verified),
+                new_value=str(payment_verified),
+                request=self.request
+            )
 
 
 #################### Additional Admin Actions ####################
 
-# class CreatePhysicalSaleView(generics.CreateAPIView):
-#     permission_classes = [IsAuthenticated, IsOwnerOrWorker]
-#     serializer_class = OrderCreateSerializer
-    
-#     def create(self, request, *args, **kwargs):
-#         # Force order type to offline for physical sales
-#         request.data['order_type'] = 'offline'
-#         return super().create(request, *args, **kwargs)
-
-
 class CreatePhysicalSaleView(generics.CreateAPIView):
-    permission_classes = [IsAuthenticated, IsOwnerOrWorker]
+    # permission_classes = [IsAuthenticated, IsOwnerOrWorker]
+    permission_classes = [IsAuthenticated, CanProcessPhysicalSales]
     serializer_class = OrderCreateSerializer
     
     def create(self, request, *args, **kwargs):
         # Force order type to offline for physical sales
         request.data['order_type'] = 'offline'
+        
+        # Auto-fill customer information from the worker
+        if not request.data.get('customer_name'):
+            request.data['customer_name'] = f"Table {request.data.get('table_number', 'N/A')} - {request.user.get_full_name()}"
+        if not request.data.get('customer_email'):
+            request.data['customer_email'] = request.user.email
+        if not request.data.get('customer_phone'):
+            request.data['customer_phone'] = 'N/A'
+        
         return super().create(request, *args, **kwargs)
     
     def perform_create(self, serializer):
@@ -731,10 +716,12 @@ class CreatePhysicalSaleView(generics.CreateAPIView):
             action='physical_sale',
             model_name='Order',
             object_id=str(order.id),
-            description=f'Physical sale created: {order.order_number}',
-            new_value=f"Status: {order.status}, Total: ${order.final_total}, Customer: {order.customer_name}, Method: {order.fulfillment_method}",
+            description=f'Physical sale created: {order.order_number} for Table {order.table_number}',
+            new_value=f"Status: {order.status}, Total: ${order.final_total}, Table: {order.table_number}, Worker: {self.request.user.get_full_name()}",
             request=self.request
         )
+
+
 
 
 class ActivityLogListView(generics.ListAPIView):
@@ -767,6 +754,7 @@ class ActivityLogListView(generics.ListAPIView):
             queryset = queryset.filter(timestamp__date__lte=end_date)
         
         return queryset
+
 
 
 ############### Additional admin management views ###############
@@ -832,14 +820,31 @@ class OrderStatsView(APIView):
 
 ################# Review Management Views ################
 
+
 class ReviewManagementView(generics.ListAPIView):
     permission_classes = [IsAuthenticated, IsOwnerOrWorker]
     serializer_class = ReviewSerializer
     queryset = Review.objects.all()
     
     def get_queryset(self):
-        return Review.objects.select_related('user', 'product').order_by('-created_at')
-
+        queryset = Review.objects.select_related('user', 'product').order_by('-created_at')
+        
+        # Filter by is_active status
+        is_active = self.request.query_params.get('is_active')
+        if is_active:
+            queryset = queryset.filter(is_active=is_active.lower() == 'true')
+        
+        # Filter by product
+        product_id = self.request.query_params.get('product')
+        if product_id:
+            queryset = queryset.filter(product_id=product_id)
+        
+        # Filter by rating
+        rating = self.request.query_params.get('rating')
+        if rating:
+            queryset = queryset.filter(rating=rating)
+        
+        return queryset
 
 class ToggleReviewStatusView(APIView):
     permission_classes = [IsAuthenticated, IsOwnerOrWorker]
@@ -866,9 +871,6 @@ class ToggleReviewStatusView(APIView):
             'detail': f'Review {action} successfully.',
             'is_active': review.is_active
         })
-    
-
-
 
 
 class EnhancedOrderStatsView(APIView):
@@ -917,3 +919,106 @@ class EnhancedOrderStatsView(APIView):
         }
         
         return Response(stats)
+
+
+
+# apps/products/views.py - ADD THIS VIEW
+
+class RoleSpecificDashboardData(APIView):
+    permission_classes = [IsAuthenticated, IsStaff]
+    
+    def get(self, request):
+        user = request.user
+        role = self.get_user_role(user)
+        
+        # Get today's date for filtering
+        today = timezone.now().date()
+        
+        data = {
+            'role': role,
+            'user': {
+                'first_name': user.first_name,
+                'last_name': user.last_name,
+                'email': user.email
+            },
+            'stats': self.get_role_stats(role, today)
+        }
+        
+        return Response(data)
+    
+    def get_user_role(self, user):
+        """Determine user's specific role"""
+        if user.is_superuser or user.groups.filter(name='Owner').exists():
+            return 'owner'
+        elif user.groups.filter(name='Chef').exists():
+            return 'chef'
+        elif user.groups.filter(name='Waiter').exists():
+            return 'waiter'
+        elif user.groups.filter(name='Cashier').exists():
+            return 'cashier'
+        elif user.groups.filter(name='Butcher').exists():
+            return 'butcher'
+        elif user.groups.filter(name='Worker').exists():
+            return 'worker'
+        return 'customer'
+    
+    def get_role_stats(self, role, today):
+        """Get statistics specific to each role"""
+        today_orders = Order.objects.filter(created_at__date=today)
+        
+        if role == 'owner':
+            return {
+                'totalRevenue': float(sum(order.final_total for order in today_orders)),
+                'totalOrders': today_orders.count(),
+                'pendingOrders': Order.objects.filter(status='pending').count(),
+                'completedOrders': today_orders.filter(status='completed').count(),
+                'lowStockProducts': Product.objects.filter(stock_quantity__lte=5, is_active=True).count(),
+            }
+        
+        elif role == 'chef':
+            return {
+                'pendingOrders': Order.objects.filter(status='pending').count(),
+                'preparingOrders': Order.objects.filter(status='preparing').count(),
+                'readyOrders': Order.objects.filter(status='ready').count(),
+                'totalOrders': Order.objects.filter(status__in=['pending', 'preparing']).count(),
+            }
+        
+        elif role == 'waiter':
+            return {
+                'activeOrders': Order.objects.filter(status__in=['pending', 'preparing', 'ready']).count(),
+                'readyOrders': Order.objects.filter(status='ready').count(),
+                'physicalSalesToday': Order.objects.filter(
+                    order_type='offline', 
+                    created_at__date=today
+                ).count(),
+            }
+        
+        elif role == 'cashier':
+            return {
+                'totalRevenue': float(sum(order.final_total for order in today_orders)),
+                'pendingPayments': Order.objects.filter(status='pending', payment_verified=False).count(),
+                'completedTransactions': today_orders.filter(status='completed').count(),
+            }
+        
+        elif role == 'butcher':
+            # Count meat-related products (you might want to adjust this logic)
+            meat_products = Product.objects.filter(
+                name__icontains='meat', 
+                is_active=True
+            ).count()
+            
+            return {
+                'meatProducts': meat_products,
+                'lowStockItems': Product.objects.filter(stock_quantity__lte=3, is_active=True).count(),
+                'totalInventory': Product.objects.filter(is_active=True).count(),
+            }
+        
+        else:  # worker or fallback
+            return {
+                'pendingOrders': Order.objects.filter(status='pending').count(),
+                'activeTasks': 5,
+            }
+
+
+
+########################################################################
